@@ -658,6 +658,93 @@ These are the exact excuses observed under deadline pressure. Every one is wrong
 | "Other code in this project does it this way." | Other code is wrong. Don't propagate it. Add a TODO if you don't have time to refactor right now, but don't start a new file with the same anti-pattern. |
 | "I'll fix it later." | You won't. The PR you're writing now is the cheapest moment to do it right. |
 
+## Audit
+
+When the user asks to **audit** a codebase against this skill (phrasings: "audit my codebase against nextjs-data-fetching", "/audit-data-fetching", "scan for data-fetching anti-patterns", "find violations of the data-fetching rules"), follow this recipe. Do not modify code during the audit — produce a report only. Offer to fix issues afterwards.
+
+### Step 1 — confirm scope
+
+Run scope checks first; if they fail, abort the audit and tell the user why:
+
+- `package.json` has `"next": "^16…"` (or 16.x range).
+- Routes live under `app/`, not `pages/`.
+
+If the project is mixed (some apps on App Router, some on Pages), narrow the audit to the App Router app(s) and say so in the report.
+
+### Step 2 — scan for the eight anti-patterns
+
+Run these greps in parallel from the project root. Each maps to one of the numbered anti-patterns in this skill. Use ripgrep where available; fall back to `grep -rn`.
+
+```bash
+# 1. useEffect calling a Server Action / async fetch in a Client Component
+rg -n --type=tsx --type=ts -B1 -A8 'useEffect\s*\(' \
+  -g '!node_modules' -g '!.next' \
+  | rg -B2 -A1 -e 'await\s+\w+\(' -e '\.then\(' -e 'fetch\('
+
+# 2. Filter/tab state in useState that triggers a re-fetch
+rg -n --type=tsx --type=ts -e 'useState.*(?:filter|tab|range|sort|page)' \
+  -g '!node_modules' -g '!.next'
+
+# 3. Manual setState refresh after a mutation (look near server-action call sites)
+rg -n --type=tsx --type=ts -B2 -A6 -e 'await\s+\w+Action\(' -e "from\s+['\"]@/lib/actions" \
+  -g '!node_modules' -g '!.next' \
+  | rg -B4 -A2 -e 'setState\(' -e 'set[A-Z]\w+\('
+
+# 4. Read-only functions exported from "use server" files
+rg -n --type=ts -B3 -A1 -e '^\s*export\s+(async\s+)?function\s+(get|list|find|fetch|load|search)[A-Z]' \
+  $(rg -l --type=ts '"use server"' -g '!node_modules' -g '!.next' 2>/dev/null) 2>/dev/null
+
+# 5. Awaited promises passed as props to Client children (blocks streaming)
+#    Heuristic: server component awaits, then renders a "use client" component with the awaited value.
+rg -n --type=tsx -B1 -A6 -e '^\s*const\s+\w+\s*=\s*await\s+' \
+  -g '!node_modules' -g '!.next'
+
+# 6. useState + Server Action read-back instead of useOptimistic
+rg -n --type=tsx -B2 -A8 -e 'useState' \
+  -g '!node_modules' -g '!.next' \
+  | rg -B4 -A4 -e 'Action\(' \
+  | rg -v 'useOptimistic'
+
+# 7. Polling via setInterval/setTimeout calling a Server Action or async read
+rg -n --type=tsx --type=ts -B1 -A6 -e 'setInterval\(' -e 'setTimeout\(.*,\s*\d{4,}' \
+  -g '!node_modules' -g '!.next'
+
+# 8. Pages or layouts marked "use client" at the top level
+rg -ln --type=tsx '^"use client"' app/ \
+  | rg -e '/page\.tsx$' -e '/layout\.tsx$' -e '/template\.tsx$'
+```
+
+For findings under `lib/actions/`, additionally inspect each file: any function whose body is a single `select` / `findMany` / `findUnique` / `service.list*` / `service.get*` call is a **Pattern 4** violation regardless of name.
+
+### Step 3 — produce the report
+
+Produce a markdown report grouped by anti-pattern (1 through 8). For each finding, include:
+
+- File path and line number (clickable: `path/to/file.tsx:42`).
+- A 3–5 line excerpt showing the offending code.
+- Which anti-pattern it matches.
+- The corresponding fix from the catalog (link to the section heading), in one sentence.
+- Severity: **high** (Pattern 1, 4, 7, 8 — direct rule violations), **medium** (Pattern 2, 3, 5, 6 — usually rule violations but sometimes legitimate), **low** (heuristic match that needs human eyes).
+
+Sort within each group by severity, then file path.
+
+End the report with a summary table:
+
+| Pattern | High | Medium | Low | Total |
+|---|---|---|---|---|
+
+…and a one-paragraph recommendation: which anti-pattern dominates, and which one to tackle first (usually Pattern 1 or 4 — they're the highest-leverage and the easiest to refactor mechanically).
+
+### Step 4 — offer next steps
+
+After delivering the report, offer (do not execute unprompted):
+
+1. **Fix one pattern at a time** — pick the highest-volume pattern, refactor it across the codebase, run tests/typecheck.
+2. **Fix one file at a time** — work top-down through the report.
+3. **Open a tracking issue** — convert the report to a GitHub issue with a checklist.
+
+Wait for the user to choose before touching code.
+
 ## In this project
 
 - Reads live in `lib/services/*.service.ts` and are called from async Server Components (the existing pattern in `app/(platform)/`, `app/(hr)/`, etc.).

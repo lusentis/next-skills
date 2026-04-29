@@ -354,6 +354,119 @@ Implementation notes — the load-bearing details:
 
 The exact file contents are project-shaped (your error classes, your service signatures, your i18n adapter), so the skill doesn't ship a copy — but the surface above is the contract every form in the codebase consumes.
 
+## Audit
+
+When the user asks to **audit** a codebase against this skill (phrasings: "audit my codebase against nextjs-forms", "/audit-forms", "scan for form anti-patterns", "find violations of the form rules"), follow this recipe. Do not modify code during the audit — produce a report only. Offer to fix issues afterwards.
+
+### Step 1 — confirm scope
+
+Run prereq checks first; if any fail, abort the audit and tell the user why:
+
+- `package.json` has `"next": "^16…"` and routes live under `app/`.
+- `@tanstack/react-form` is in `dependencies`.
+- `react-hook-form` is **not** in `dependencies`. If both are present, that's the first finding — flag it and ask the user which one wins before continuing.
+- `components.json` exists at the project root (shadcn/ui configured).
+- The required shadcn components are installed (check `components/ui/` for `field.tsx`, `input.tsx`, `textarea.tsx`, `select.tsx`, `checkbox.tsx`, `switch.tsx`, `radio-group.tsx`, `button.tsx`, `label.tsx`, and `sonner.tsx`).
+- `lib/forms/index.ts` exists and exports `useEditForm`, `useCreateForm`, `FormProvider`, `FormField`, `FormActions`, `mapFormError`. If the toolkit is missing, that's a top-of-report finding — every other violation downstream is partly caused by its absence.
+
+### Step 2 — scan for the violations
+
+Run these greps in parallel from the project root. Each maps to a rule in this skill. Use ripgrep where available; fall back to `grep -rn`.
+
+```bash
+# A. react-hook-form imports anywhere in the codebase
+rg -n --type=tsx --type=ts -e "from\s+['\"]react-hook-form['\"]" \
+  -g '!node_modules' -g '!.next'
+
+# B. Raw useForm from @tanstack/react-form (bypassing useEditForm/useCreateForm)
+rg -n --type=tsx --type=ts -B1 -A2 -e "from\s+['\"]@tanstack/react-form['\"]" \
+  -g '!node_modules' -g '!.next' -g '!lib/forms/**'
+
+# C. useState bound to form-like inputs (likely re-implementing field state)
+rg -n --type=tsx -B1 -A8 -e 'useState' \
+  -g '!node_modules' -g '!.next' \
+  | rg -B4 -A4 -e '<Input\b' -e '<Textarea\b' -e '<Select\b' -e '<Checkbox\b' -e '<Switch\b' -e '<RadioGroup\b'
+
+# D. toast.success / toast.error called from form components (look for files that import a form hook AND call toast directly)
+rg -ln --type=tsx -e 'useEditForm|useCreateForm' \
+  -g '!node_modules' -g '!.next' -g '!lib/forms/**' \
+  | xargs -I{} rg -lH --type=tsx -e 'toast\.(success|error)\b' {} 2>/dev/null
+
+# E. Save-on-blur / debounce / auto-save patterns
+rg -n --type=tsx --type=ts -B1 -A4 \
+  -e 'onBlur.*save' -e 'debounce\(' -e 'setTimeout\(.*save' -e 'autosave|auto-save|autoSave' \
+  -g '!node_modules' -g '!.next' -g '!lib/forms/**'
+
+# F. Hand-rolled dirty tracking (initial-values refs, manual diff)
+rg -n --type=tsx --type=ts -e 'initialValuesRef' -e 'isDirty\s*=\s*JSON\.stringify' -e 'lastSavedRef' \
+  -g '!node_modules' -g '!.next' -g '!lib/forms/**'
+
+# G. <form onSubmit> without going through form.handleSubmit (manual fetch in the submit handler)
+rg -n --type=tsx -B1 -A8 -e '<form\s+onSubmit' \
+  -g '!node_modules' -g '!.next' \
+  | rg -B4 -A4 -e 'fetch\(' -e 'await\s+\w+Service\.' \
+  | rg -v 'form\.handleSubmit'
+
+# H. AbortController or signal handling inline in form components (toolkit's job)
+rg -n --type=tsx -B1 -A4 -e 'new\s+AbortController\(' \
+  $(rg -l --type=tsx -e 'useEditForm|useCreateForm|<form\b' -g '!node_modules' -g '!.next' 2>/dev/null) 2>/dev/null \
+  | rg -v 'lib/forms/'
+
+# I. Inline strings on form labels/buttons (i18n bypass) — only if the project uses an i18n library
+#    Detect i18n setup first:
+rg -ln -e "from\s+['\"]next-intl['\"]" -e "from\s+['\"]react-i18next['\"]" -e "from\s+['\"]@lingui" \
+  -g '!node_modules' -g '!.next' >/dev/null && \
+rg -n --type=tsx -B1 -A1 -e '<FieldLabel>[^{<]' -e '<Button[^>]*>[A-Z][a-z]' \
+  $(rg -l --type=tsx -e 'useEditForm|useCreateForm' -g '!node_modules' -g '!.next' 2>/dev/null) 2>/dev/null
+
+# J. Forms missing dirty-state gating on Save (button always enabled or only gated on isSubmitting)
+rg -n --type=tsx -B2 -A6 -e '<Button\s+type=["\x27]submit["\x27]' \
+  $(rg -l --type=tsx -e 'useEditForm' -g '!node_modules' -g '!.next' 2>/dev/null) 2>/dev/null \
+  | rg -v -e 'isDirty' -e '<FormActions'
+```
+
+For each candidate match, open the file and confirm the violation by eye — several patterns above are heuristics that can match legitimate code (e.g. `useState` for non-form UI state in a file that also has a form).
+
+### Step 3 — produce the report
+
+Produce a markdown report grouped by violation kind (A through J above). For each finding, include:
+
+- File path and line number (clickable: `path/to/file.tsx:42`).
+- A 3–5 line excerpt showing the offending code.
+- Which rule it violates (link to the matching section in this skill).
+- The corrected approach in one sentence.
+- Severity:
+  - **high** — A (mixed form libraries), B (raw `useForm` outside the toolkit), D (inline `toast` from form code), G (manual fetch in submit), J (Save not gated on dirty).
+  - **medium** — C (form fields in `useState`), E (auto-save / blur-save / debounce — direct rule violation but sometimes copy-paste legacy), F (hand-rolled dirty tracking), H (inline AbortController).
+  - **low** — I (i18n bypass — needs eyes to distinguish UI strings from valid hard-coded values like `aria-label="search"`).
+
+Sort within each group by severity, then file path.
+
+End the report with a summary table:
+
+| Violation | High | Medium | Low | Total |
+|---|---|---|---|---|
+
+…and a one-paragraph recommendation. The usual order to fix:
+
+1. If the toolkit is missing (Step 1 finding), build `lib/forms/` first — every other fix depends on it.
+2. Pattern A (mixed form libraries) — pick one, removal of the other is a project-wide decision.
+3. Pattern B + D (raw `useForm`, inline toasts) — usually the same files; refactor together.
+4. Pattern J (missing dirty gating) and E (auto-save) — these change UX, so they're worth a focused PR with a screenshot diff.
+5. Patterns C, F, G, H — mechanical refactors once the toolkit is in place.
+6. Pattern I — last, after the structural fixes are in.
+
+### Step 4 — offer next steps
+
+After delivering the report, offer (do not execute unprompted):
+
+1. **Build the toolkit** — if `lib/forms/` is missing, scaffold it from the [Toolkit reference](#toolkit-reference) section.
+2. **Fix one violation kind at a time** — pick the highest-volume pattern, refactor it across the codebase, run tests/typecheck.
+3. **Fix one form at a time** — work top-down through the report, one file per commit.
+4. **Open a tracking issue** — convert the report to a GitHub issue with a checklist.
+
+Wait for the user to choose before touching code.
+
 ## When in doubt
 
 Re-read this skill, look at the most-recent existing edit form and create form in the codebase, and copy their structure. If the existing forms violate this skill, fix the new one to match the skill (not the existing forms) and flag the drift to the user.
