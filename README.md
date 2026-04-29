@@ -59,7 +59,12 @@ It also ships a scope check (refuses to apply outside Next.js 16 App Router), a 
 
 ## Companion skill — strongly recommended
 
-`nextjs-data-fetching` **never** recommends a raw `useEffect`. The React-side rule that backs that up — the five replacement patterns plus the `useMountEffect` escape hatch — lives in the **`no-use-effect`** skill (origin: [@alvinsng](https://x.com/alvinsng/status/2033969062834045089)). Install whichever published copy you trust alongside this one.
+`nextjs-data-fetching` **never** recommends a raw `useEffect`. The React-side rule that backs that up — the five replacement patterns plus the `useMountEffect` escape hatch — lives in the **`no-use-effect`** skill (origin: [@alvinsng](https://x.com/alvinsng/status/2033969062834045089), published as part of [`factory-ai/factory-plugins`](https://github.com/factory-ai/factory-plugins)). Install both alongside each other:
+
+```bash
+npx skills add https://github.com/factory-ai/factory-plugins --skill no-use-effect -a claude-code
+npx skills add lusentis/next-skills --skill nextjs-data-fetching -a claude-code
+```
 
 ## Repo layout
 
