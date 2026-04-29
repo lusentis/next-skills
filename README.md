@@ -9,6 +9,7 @@ Each skill is a single `SKILL.md` with YAML frontmatter under `skills/<skill-nam
 | Skill | Summary |
 |---|---|
 | [`nextjs-data-fetching`](skills/nextjs-data-fetching/SKILL.md) | Read with Server Components, mutate with Server Actions, never fetch via `useEffect`. Eight ❌→✅ pairs verified against the Next.js 16 docs, plus a rationalizations table and red-flag list. |
+| [`nextjs-forms`](skills/nextjs-forms/SKILL.md) | One shared toolkit on TanStack Form + Zod + shadcn `Field` for every form in the app. Every form has an explicit Save button gated by dirty + valid state — no auto-save, no save-on-blur. Bans `useState` for field values, `react-hook-form`, hand-rolled dirty tracking, inline `toast.success`/`toast.error`. Pairs with the dedicated `tanstack-form` skill. |
 
 More skills will be added over time.
 
@@ -26,6 +27,7 @@ npx skills add lusentis/next-skills -a claude-code
 
 ```bash
 npx skills add lusentis/next-skills --skill nextjs-data-fetching -a claude-code
+npx skills add lusentis/next-skills --skill nextjs-forms -a claude-code
 ```
 
 ### List available skills before installing
@@ -57,13 +59,26 @@ It bans the most common modern-Next.js anti-pattern — calling a Server Action 
 
 It also ships a scope check (refuses to apply outside Next.js 16 App Router), a 16-row rationalizations table, and a red-flag list for code review.
 
-## Companion skill — strongly recommended
+## What `nextjs-forms` enforces
 
-`nextjs-data-fetching` **never** recommends a raw `useEffect`. The React-side rule that backs that up — the five replacement patterns plus the `useMountEffect` escape hatch — lives in the **`no-use-effect`** skill (origin: [@alvinsng](https://x.com/alvinsng/status/2033969062834045089), published as part of [`factory-ai/factory-plugins`](https://github.com/factory-ai/factory-plugins)). Install both alongside each other:
+The headline rule: **every form goes through one shared toolkit on TanStack Form + Zod + the shadcn `Field` primitive, and every form has an explicit Save button gated by dirty + valid state — no auto-save, no save-on-blur.**
+
+It bans hand-rolling the same five concerns in every form (field state in `useState`, raw `useForm` from `@tanstack/react-form`, custom dirty tracking, inline `toast.success`/`toast.error`, ad-hoc 422 error mapping) and codifies two hooks — `useEditForm` and `useCreateForm` — that own them once.
+
+Prereqs the skill checks before applying: Next.js 16 App Router, `@tanstack/react-form` in deps, Zod v4, shadcn/ui configured (registry-agnostic — Radix-based or Base UI-based both work), the required shadcn components installed (`field`, `input`, `textarea`, `select`, `checkbox`, `switch`, `radio-group`, `button`, `label`, `sonner`), and a `lib/forms/` toolkit exporting the shared surface.
+
+## Companion skills — strongly recommended
+
+`nextjs-data-fetching` **never** recommends a raw `useEffect`. The React-side rule that backs that up — the five replacement patterns plus the `useMountEffect` escape hatch — lives in the **`no-use-effect`** skill (origin: [@alvinsng](https://x.com/alvinsng/status/2033969062834045089), published as part of [`factory-ai/factory-plugins`](https://github.com/factory-ai/factory-plugins)).
+
+`nextjs-forms` governs *where* TanStack Form fits in a Next.js + shadcn project, but doesn't teach the library itself. For idiomatic TanStack Form usage (`form.Field`, `form.Subscribe`, validators, field arrays, async validation, the full API surface), pair it with the dedicated **`tanstack-form`** skill from [`tanstack-skills/tanstack-skills`](https://github.com/tanstack-skills/tanstack-skills).
+
+Install everything together:
 
 ```bash
 npx skills add https://github.com/factory-ai/factory-plugins --skill no-use-effect -a claude-code
-npx skills add lusentis/next-skills --skill nextjs-data-fetching -a claude-code
+npx skills add https://github.com/tanstack-skills/tanstack-skills --skill tanstack-form -a claude-code
+npx skills add lusentis/next-skills -a claude-code
 ```
 
 ## Repo layout
@@ -72,7 +87,9 @@ npx skills add lusentis/next-skills --skill nextjs-data-fetching -a claude-code
 next-skills/
 ├── README.md
 └── skills/
-    └── nextjs-data-fetching/
+    ├── nextjs-data-fetching/
+    │   └── SKILL.md
+    └── nextjs-forms/
         └── SKILL.md
 ```
 
