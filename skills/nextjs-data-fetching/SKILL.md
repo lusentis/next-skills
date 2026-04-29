@@ -56,22 +56,46 @@ Concretely, a `useEffect`-driven Server Action read costs you:
 
 ## Decision: how to load data
 
+The first question is **not** "where does the data need to land?" — it's "**why is this a Client Component at all?**" Most reads belong on the server. If the answer is anything weaker than "polling, focus refetch, or a third party mutates the data without user intent," the fix is to lift the read to a Server Component, not to swap the transport.
+
 ```dot
 digraph data_fetching {
-  "Need to read data?" [shape=diamond];
-  "Where is the data needed?" [shape=diamond];
-  "Async Server Component (await directly)" [shape=box];
-  "Pass promise from Server Component, use() in Client Component" [shape=box];
-  "Route Handler (GET) + fetch / SWR / React Query" [shape=box];
+  "Why is this a Client Component?" [shape=diamond];
+  "Server Component, await directly" [shape=box];
+  "URL searchParams; page stays Server Component" [shape=box];
+  "Promise<T> from Server Component, use() in Client leaf" [shape=box];
+  "Route Handler GET + SWR / React Query (last resort)" [shape=box];
 
-  "Need to read data?" -> "Where is the data needed?";
-  "Where is the data needed?" -> "Async Server Component (await directly)" [label="Server Component (default)"];
-  "Where is the data needed?" -> "Pass promise from Server Component, use() in Client Component" [label="Client Component, on first render"];
-  "Where is the data needed?" -> "Route Handler (GET) + fetch / SWR / React Query" [label="Client Component, polling / interactive refetch / cacheable HTTP"];
+  "Why is this a Client Component?" -> "Server Component, await directly" [label="It isn't / shouldn't be"];
+  "Why is this a Client Component?" -> "URL searchParams; page stays Server Component" [label="Filter / tab / range state"];
+  "Why is this a Client Component?" -> "Promise<T> from Server Component, use() in Client leaf" [label="Genuine interactivity at the data boundary, initial data only"];
+  "Why is this a Client Component?" -> "Route Handler GET + SWR / React Query (last resort)" [label="Polling, focus refetch, or third-party mutates the data"];
 }
 ```
 
+**The branches are not peers.** Top to bottom: Server Component (default, ~90% of cases), URL state (most "I need filters" cases), `use()` + `<Suspense>` (rare — Client Component genuinely needs data as props at mount), Route Handler + SWR (last resort, narrow scope). Reaching for the bottom branch when an upper branch fits is the most common failure mode of this skill.
+
 **Server Actions are for mutations only.** The only legitimate "action call from a button" that returns data is a follow-up to a user-initiated mutation (e.g., a form submission that returns the new record).
+
+## Migrating away from `useEffect` + Server Action — the ladder
+
+If you're staring at `useState` + `useEffect` + a `"use server"` read in a Client Component, walk this ladder **top-down** and stop at the first rung that fits. It's almost always rung 1. The most common failure mode of this skill is skipping rungs 1–3 and landing on rung 4 because it's the smallest physical diff.
+
+1. **Lift the read to a Server Component.** Convert the page to `async function Page({ searchParams })`, `await` the read at the top, pass data down. If the page has interactive state, ask rung 2 *before* deciding it has to stay client.
+2. **Move state to URL `searchParams`.** Tabs, filters, ranges, pagination, sort, search query — all belong in the URL. The Client leaf calls `router.replace`; the Server Component re-renders with new data. The page stays a Server Component. Free streaming, free cache, shareable URL, back-button works.
+3. **Pass `Promise<T>` from Server Component, consume with `use()` + `<Suspense>`.** Only when a Client Component genuinely needs server data as props at mount (charting libraries, third-party widgets that expect a synchronous data shape). Page stays a Server Component; only the interactive leaf is `"use client"`.
+4. **`GET` Route Handler + SWR / React Query.** Reserved for: interval polling, focus revalidation, or a third party mutates the data outside your app. **Not** for "I already have a Client Component and want to keep it."
+
+### The lateral migration is the failure mode
+
+`useEffect` + action → `useSWR` + Route Handler in the same Client Component is the wrong refactor. It feels like progress — no more action-as-read — but:
+
+- The page is still `"use client"`. No SSR, no streaming, same bad LCP.
+- You traded a sequential POST queue for a sequential `fetch`. Same waterfall.
+- "Route Handlers cache!" — not for per-user, per-org reads. Your `/api/cases` is `Cache-Control: private`; the CDN won't touch it; SWR dedups within one tab, not across users.
+- You added a network hop, a JSON serialization layer, a client library, and an extra route file — for zero cache wins over the Server Component you should have written.
+
+If you reached rung 4 without first asking "can this page simply be a Server Component?", you took the wrong rung. Back up.
 
 ## The four correct patterns
 
@@ -128,24 +152,7 @@ export default function CasesTable({
 
 The Server Component starts the fetch, streams HTML as soon as it can, and the Client Component hydrates with the resolved value. No client-side waterfall.
 
-### 3. Route Handler for cacheable / pollable / mutating-from-third-party reads
-
-If a Client Component truly needs to refetch on a timer, on focus, or via SWR/React Query keys, expose a `GET` Route Handler and fetch it normally:
-
-```ts
-// app/api/cases/route.ts
-import { NextResponse } from "next/server";
-import { listCases } from "@/lib/services/case.service";
-
-export async function GET() {
-  const cases = await listCases();
-  return NextResponse.json(cases);
-}
-```
-
-Route Handlers are real HTTP — cacheable, parallelizable, and compatible with SWR/React Query. Server Actions are not.
-
-### 4. Server Action — only for mutations, invoked via `<form>` or event handler after user intent
+### 3. Server Action — only for mutations, invoked via `<form>` or event handler after user intent
 
 ```tsx
 "use server";
@@ -156,6 +163,38 @@ export async function archiveCase(id: string) {
 ```
 
 After the mutation, call `revalidatePath` / `revalidateTag` and let the Server Component re-render with fresh data. Don't return a list to refresh client state by hand.
+
+### 4. Route Handler + SWR / React Query — last resort, narrow scope
+
+**Reach for this only when the data genuinely changes without user intent**: interval polling, focus revalidation, or a third party mutates the data outside your app. Anything else — initial data, post-mutation refresh, filter / tab / range state — belongs in patterns 1–3.
+
+This is the *last resort*, not a peer of patterns 1–3. For per-user, per-org reads (almost everything in this project), "Route Handlers participate in HTTP caching" doesn't cash out: your route is `Cache-Control: private`, the CDN doesn't cache it, and SWR's dedup/focus-revalidation only helps within a single browser tab. You're paying for a network hop, a JSON layer, and a client library to land where a Server Component already started.
+
+```ts
+// app/api/dashboard/stats/route.ts — only because the dashboard polls every 5s
+import { NextResponse } from "next/server";
+import { getDashboardStats } from "@/lib/services/dashboard.service";
+
+export async function GET(req: Request) {
+  const range = new URL(req.url).searchParams.get("range") ?? "30d";
+  return NextResponse.json(await getDashboardStats(range));
+}
+```
+
+```tsx
+"use client";
+import useSWR from "swr";
+const fetcher = (u: string) => fetch(u).then((r) => r.json());
+
+export function LiveStats({ range }: { range: string }) {
+  const { data } = useSWR(`/api/dashboard/stats?range=${range}`, fetcher, {
+    refreshInterval: 5_000,
+  });
+  return /* … */;
+}
+```
+
+If your Client Component doesn't poll, doesn't refetch on focus, and isn't watching externally-mutated data, **you don't need this**. Walk back up the migration ladder.
 
 ## Anti-pattern catalog — red ❌ → green ✅
 
@@ -485,6 +524,8 @@ export function Thread({ messages }: { messages: Message[] }) {
 
 ### 7. Polling / interval-refetch via Server Action
 
+This is the **only** anti-pattern in this section whose `✅` solution is pattern 4 (Route Handler + SWR), and only because the Red genuinely polls. If your `useEffect` + action just runs once at mount to load data, the Green for *that* case is pattern 1 (Server Component) or pattern 2 (`Promise<T>` + `use()`) — **not** this one. Don't grab this code as the template for migrating any `useEffect` + action to SWR.
+
 ❌ **Red — Server Actions are queued and uncached, polling them serializes the whole page:**
 
 ```tsx
@@ -497,7 +538,7 @@ useEffect(() => {
 }, []);
 ```
 
-✅ **Green — `GET` Route Handler + SWR / React Query. Real HTTP, real cache, deduped, cancelable:**
+✅ **Green — only because this genuinely polls every 5s. `GET` Route Handler + SWR / React Query:**
 
 ```ts
 // app/api/dashboard/stats/route.ts
@@ -524,7 +565,7 @@ export function LiveStats({ range }: { range: string }) {
 }
 ```
 
-Route Handlers participate in HTTP caching, conditional requests, and SWR's dedup/focus-revalidation. Server Actions don't.
+The honest claim: Server Actions are queued, single-flight, can't be cancelled, and have no dedup. For *genuine* polling they're worse than Route Handlers — that's the whole reason this pattern exists. The "Route Handlers cache!" framing oversells: per-user reads are `Cache-Control: private`, CDN-uncacheable, and SWR's dedup applies only within one tab.
 
 ---
 
@@ -570,10 +611,11 @@ The default for every new page should be Server Component. Add `"use client"` to
 | You want to… | Use |
 |---|---|
 | Initial page data | Async Server Component (`await` at top of component) |
+| Filter / tab / range / pagination / search state | URL `searchParams` — page stays a Server Component; the Client leaf calls `router.replace` |
 | Initial data inside an interactive (Client) component | Pass `Promise<T>` from Server Component, `use()` + `<Suspense>` |
-| Refetch on interval / focus / key change | Route Handler `GET` + SWR or React Query |
 | Mutate (insert/update/delete) | Server Action (`"use server"`), invoked via `<form>` or event handler |
 | Refresh data after mutation | `revalidatePath` / `revalidateTag` inside the Server Action — do NOT manually refetch into client state |
+| Refetch on interval / focus / external mutation (last resort — not for "I have a Client Component") | Route Handler `GET` + SWR or React Query |
 
 ## Red flags — STOP and switch pattern
 
@@ -587,6 +629,9 @@ If you catch yourself writing or approving any of these, stop:
 - Two or more Server Action calls inside the same effect or event handler (guaranteed sequential)
 - Filter/range/tab state in `useState` + a Server Action refetch on change (use URL `searchParams` instead — they trigger a Server Component re-render, no client refetch needed)
 - Adding a Suspense `key={range}` and a Server Component that re-runs is **good**; adding a Suspense `key` so a `useEffect` fires again is the wrong pattern with a new wrapper
+- **Migrating `useEffect` + Server Action to `useSWR` + `GET /api/…` Route Handler in the same Client Component, without first asking whether the page could simply be a Server Component.** This is *the* most common failure mode of this skill — it feels like progress, but the page stays `"use client"`, the waterfall stays, the LCP stays bad, and you've added a network hop and a client library for nothing. Walk the migration ladder.
+- Introducing a `GET /api/x` Route Handler to feed `useSWR` in a page that has no genuine reason to be `"use client"` — no polling, no focus refetch, no third-party data source. The page wants to be a Server Component; let it.
+- `useSWR` whose only `refreshInterval` / `revalidateOnFocus` config is the default (off) — i.e., it's only ever loading once. That's not what SWR is for; pass `Promise<T>` from a Server Component and `use()` it instead.
 
 ## Common rationalizations and the honest answer
 
@@ -603,9 +648,11 @@ These are the exact excuses observed under deadline pressure. Every one is wrong
 | "I already have the action, why duplicate it as a service?" | The reusable unit lives in `lib/services/`. The action in `lib/actions/` is a thin wrapper that adds `requirePermission` + Zod validation + `createAuditLog` + `revalidatePath` for **mutations**. Server Components import the service directly. No duplication — different responsibilities. |
 | "I need it in a Client Component for interactivity / filters / tabs." | Interactivity ≠ client-side fetching. Put filter state in URL `searchParams` (the Client Component pushes via `router.replace`); the Server Component re-renders with fresh data. For data the Client Component needs at mount, pass `Promise<T>` from the parent Server Component and consume with `use()`. |
 | "I need to refetch after a mutation." | Mutation calls `revalidatePath` / `revalidateTag` and the Server Component re-renders automatically. Do not return data from the action and `setState` it into the client. |
-| "I need to refetch on a timer / on focus / on key change." | That's the one case for SWR or React Query — pointed at a `GET` Route Handler. Not a Server Action. |
+| "I need to refetch on a timer / on focus / when an external system mutates the data." | That's the one case for SWR or React Query — pointed at a `GET` Route Handler. Not a Server Action. (Note: a Suspense `key` change does **not** count — that already re-runs the Server Component, no SWR needed.) |
+| "I migrated to SWR + Route Handler — that's the recommended pattern." | SWR + Route Handler is the **last** recommended pattern, not the **first**. The migration ladder for `useEffect` + action starts at "make the page a Server Component" and only reaches SWR if the data genuinely polls, refetches on focus, or is mutated by an external system. Skipping rungs 1–3 because rung 4 is the smallest physical diff is the failure mode this skill is trying to prevent. If your `useSWR` has no `refreshInterval` and no `revalidateOnFocus`, you wrote a Client Component that loads once — exactly what `Promise<T>` + `use()` is for. |
+| "But useEffect + action was the anti-pattern, and SWR fixes it." | SWR doesn't fix the page being `"use client"` when it shouldn't be. It just hides the same client-side waterfall behind a different API. The anti-pattern wasn't "Server Action over fetch"; it was "loading initial data on the client at all." |
 | "URL searchParams are awkward / I don't want them in the URL." | Use the URL anyway. Shareable, bookmarkable, back-button works, no client/server state divergence, free Server Component re-render. The "ugliness" is a smaller cost than every alternative. |
-| "Server Actions and Route Handlers both POST/GET, same wire cost." | Route Handlers participate in HTTP cache, dedup, CDN, conditional requests. Server Actions don't. The wire cost is similar; the cache cost is not. |
+| "Server Actions and Route Handlers both POST/GET, same wire cost." | True — and that's the point. For *initial-load* data, the right answer isn't "swap Server Action for Route Handler," it's "don't load on the client at all." The Route Handler advantage (HTTP cache, dedup, conditional requests, CDN) only cashes out for **public, cacheable** URLs; per-user/per-org reads are `Cache-Control: private` and the CDN won't touch them. Reach for Route Handler + SWR only when you genuinely poll or refetch on focus. |
 | "It's not my PR — refactoring is scope creep." | Approving the wrong primitive is approving permanent debt. Block, link this skill, ask for the Server Component version. That's the review's job. |
 | "Optimistic UI needs client state." | `useOptimistic` gives you optimistic UI **without** moving the source of truth to the client. The action still mutates and `revalidatePath`s; the optimistic value bridges the gap. |
 | "Other code in this project does it this way." | Other code is wrong. Don't propagate it. Add a TODO if you don't have time to refactor right now, but don't start a new file with the same anti-pattern. |
