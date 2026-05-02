@@ -10,6 +10,7 @@ Each skill is a single `SKILL.md` with YAML frontmatter under `skills/<skill-nam
 |---|---|
 | [`nextjs-data-fetching`](skills/nextjs-data-fetching/SKILL.md) | Read with Server Components, mutate with Server Actions, never fetch via `useEffect`. Eight ❌→✅ pairs verified against the Next.js 16 docs, plus a rationalizations table and red-flag list. |
 | [`nextjs-forms`](skills/nextjs-forms/SKILL.md) | One shared toolkit on TanStack Form + Zod + shadcn `Field` for every form in the app. Every form has an explicit Save button gated by dirty + valid state — no auto-save, no save-on-blur. Bans `useState` for field values, `react-hook-form`, hand-rolled dirty tracking, inline `toast.success`/`toast.error`. Pairs with the dedicated `tanstack-form` skill. |
+| [`nextjs-usestate`](skills/nextjs-usestate/SKILL.md) | `useState` is for ephemeral, local, view-only UI state — almost never the right answer in an App Router app. Thirteen ❌→✅ pairs covering URL state, server data, form values, derived state, prop mirroring, cookies for cross-render preferences, refs for non-render values, and the big one: open/closed state for shadcn / Radix / Base UI primitives belongs to the primitive, not to `useState`. **Explicitly forbids** Zustand, Jotai, Redux, Redux Toolkit, Recoil, Valtio, and MobX — every problem they solve in a classic SPA is solved better by App Router primitives (URL `searchParams`, cookies, Server Components, `useOptimistic`). |
 
 More skills will be added over time.
 
