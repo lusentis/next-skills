@@ -206,6 +206,87 @@ export function CasesFilters({ value }: { value: string }) {
 
 For non-trivial URL state (typed params, arrays, defaults, debouncing), prefer **`nuqs`** over hand-rolled `URLSearchParams` — it gives you `useQueryState`/`useQueryStates` with full type-safety and clean defaults, and it round-trips cleanly with Server Components.
 
+#### 1a. Search-as-you-type bound to URL state
+
+Chips and tabs push to the URL once per click — fine. A **text input** that pushes on every keystroke is not. Each `router.replace` re-renders the page (and on a Server Component page, refetches data on the server), which lands back in the input as a controlled-value update. On a slow page that's visible jank: the cursor stutters, characters arrive late, IME composition breaks.
+
+❌ **Red — controlled input bound directly to `?q=`; every keystroke triggers a navigation, every navigation re-renders the input, the input lags behind typing:**
+
+```tsx
+"use client";
+import { useRouter, useSearchParams, usePathname } from "next/navigation";
+import { Input } from "@/components/ui/input";
+
+export function CasesSearch() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const sp = useSearchParams();
+  const query = sp.get("q") ?? "";
+  return (
+    <Input
+      value={query}
+      onChange={(e) => {
+        const next = new URLSearchParams(sp);
+        if (e.target.value) next.set("q", e.target.value);
+        else next.delete("q");
+        router.replace(`${pathname}?${next}`, { scroll: false });
+      }}
+    />
+  );
+}
+```
+
+✅ **Green — uncontrolled input, frozen `defaultValue`, debounced `router.replace` wrapped in `startTransition`. Typing is local DOM only; the URL catches up after the user pauses; the navigation never blocks input:**
+
+```tsx
+"use client";
+import { useRef, useTransition } from "react";
+import { useRouter, useSearchParams, usePathname } from "next/navigation";
+import { Input } from "@/components/ui/input";
+
+export function CasesSearch() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const sp = useSearchParams();
+  const query = sp.get("q") ?? "";
+
+  const initialQueryRef = useRef(query);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [, startTransition] = useTransition();
+
+  const setQuery = (next: string) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      const params = new URLSearchParams(sp);
+      if (next) params.set("q", next);
+      else params.delete("q");
+      const qs = params.toString();
+      startTransition(() => {
+        router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+      });
+    }, 200);
+  };
+
+  return (
+    <Input
+      key={pathname}
+      defaultValue={initialQueryRef.current}
+      onChange={(e) => setQuery(e.target.value)}
+    />
+  );
+}
+```
+
+Three details that all matter:
+
+1. **`defaultValue={initialQueryRef.current}`, not `defaultValue={query}`.** Uncontrolled inputs read `defaultValue` once on mount; passing the live URL value re-initializes it on every URL change and React (and Base UI / Radix `FieldControl`) will warn: *"A component is changing the default value state of an uncontrolled FieldControl after being initialized."* Freezing the initial value in a ref keeps `defaultValue` referentially stable for the lifetime of the input.
+2. **`key={pathname}` on the input.** When the user navigates to a different route (or any other identity change you want to reset on), the key changes, the input remounts, and the ref captures a fresh initial value. This is React's built-in "reset state on identity change" mechanism — see Pattern 6.
+3. **`startTransition` around `router.replace`.** Marks the navigation as non-urgent so the input keeps responding even if the Server Component re-render is slow.
+
+The local filter list (if any) should still read from the URL (`useSearchParams().get("q")`), optionally through `useDeferredValue`, so the *displayed* results are the source of truth — only the *input field* is uncontrolled. **Do not** mirror the URL value into a `useState` "to keep the input snappy" — that's the controlled-input anti-pattern wearing a different hat, and now you have two sources of truth.
+
+`nuqs` `useQueryState({ throttleMs })` does the debounce part for you, but the uncontrolled-input + frozen-`defaultValue` + `key` combination still applies — `throttleMs` only smooths the URL writes, not the controlled-value re-render.
+
 > Cross-reference: see `nextjs-data-fetching` anti-patterns #2 and #8. The same rule from a different angle.
 
 ---
