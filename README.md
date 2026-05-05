@@ -11,6 +11,7 @@ Each skill is a single `SKILL.md` with YAML frontmatter under `skills/<skill-nam
 | [`nextjs-data-fetching`](skills/nextjs-data-fetching/SKILL.md) | Read with Server Components, mutate with Server Actions, never fetch via `useEffect`. Eight ❌→✅ pairs verified against the Next.js 16 docs, plus a rationalizations table and red-flag list. |
 | [`nextjs-forms`](skills/nextjs-forms/SKILL.md) | One shared toolkit on TanStack Form + Zod + shadcn `Field` for every form in the app. Every form has an explicit Save button gated by dirty + valid state — no auto-save, no save-on-blur. Bans `useState` for field values, `react-hook-form`, hand-rolled dirty tracking, inline `toast.success`/`toast.error`. Pairs with the dedicated `tanstack-form` skill. |
 | [`nextjs-usestate`](skills/nextjs-usestate/SKILL.md) | `useState` is for ephemeral, local, view-only UI state — almost never the right answer in an App Router app. Thirteen ❌→✅ pairs covering URL state, server data, form values, derived state, prop mirroring, cookies for cross-render preferences, refs for non-render values, and the big one: open/closed state for shadcn / Radix / Base UI primitives belongs to the primitive, not to `useState`. **Explicitly forbids** Zustand, Jotai, Redux, Redux Toolkit, Recoil, Valtio, and MobX — every problem they solve in a classic SPA is solved better by App Router primitives (URL `searchParams`, cookies, Server Components, `useOptimistic`). |
+| [`no-await-import`](skills/no-await-import/SKILL.md) | Hard-bans `await import()` and dynamic `import(...)` in production code. Use static imports, explicit registries, framework-native lazy loading, or split module boundaries instead. Allows `await import()` only rarely in tests, and only with an inline comment explaining why it is the best option. |
 | [`screenshots`](skills/screenshots/SKILL.md) | One canonical place for every browser screenshot an agent takes — `.screenshots/` at the repo root, gitignored, split into `qa/` (final captures the user should review — opened automatically) and `debug/` (working captures the agent uses for itself — never opened). Enforces a `YYYYMMDD-HHMMSS-<slug>.png` filename format and works across `chrome-devtools` MCP, `playwright` MCP, and gstack `/browse`, `/qa`, `/design-review`. Not Next.js-specific, but the convention all the other skills in this repo assume when they ask for a screenshot. |
 
 More skills will be added over time.
@@ -31,6 +32,7 @@ npx skills add lusentis/next-skills -a claude-code
 npx skills add lusentis/next-skills --skill nextjs-data-fetching -a claude-code
 npx skills add lusentis/next-skills --skill nextjs-forms -a claude-code
 npx skills add lusentis/next-skills --skill nextjs-usestate -a claude-code
+npx skills add lusentis/next-skills --skill no-await-import -a claude-code
 npx skills add lusentis/next-skills --skill screenshots -a claude-code
 ```
 
@@ -62,6 +64,14 @@ It bans the most common modern-Next.js anti-pattern — calling a Server Action 
 | 8 | Whole page set to `"use client"` for one piece of state | Keep page as Server Component; smallest leaf gets `"use client"` |
 
 It also ships a scope check (refuses to apply outside Next.js 16 App Router), a 16-row rationalizations table, and a red-flag list for code review.
+
+## What `no-await-import` enforces
+
+The headline rule: **never use `await import()` or dynamic `import(...)` in production code.**
+
+It bans dynamic imports in application, library, build, script, and runtime code, including literal-path imports (`await import("@/lib/foo")`), promise-style imports (`import("@/lib/foo").then(...)`), and computed module paths (`import("./providers/" + name)`). The replacements are static imports, explicit registries, split server/client or node/browser entrypoints, and framework-native lazy-loading primitives such as `next/dynamic` or `React.lazy` when UI code splitting is genuinely needed.
+
+The only exception is rare test code that needs fresh module evaluation after setting mocks, globals, environment variables, or fake timers. Even then, the line immediately above the dynamic import must explain why `await import()` is the best option and why static imports, dependency injection, or normal test-runner mocks cannot express the case cleanly.
 
 ## What `nextjs-forms` enforces
 
@@ -107,6 +117,8 @@ npx skills add lusentis/next-skills -a claude-code
 next-skills/
 ├── README.md
 └── skills/
+    ├── no-await-import/
+    │   └── SKILL.md
     ├── nextjs-data-fetching/
     │   └── SKILL.md
     ├── nextjs-forms/
